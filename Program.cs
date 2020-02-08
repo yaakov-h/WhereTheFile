@@ -10,6 +10,7 @@ using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using WhereTheFile.Database;
 using WhereTheFile.Types;
+using WhereTheFile.Windows;
 using DriveInfo = WhereTheFile.Types.DriveInfo;
 
 namespace WhereTheFile
