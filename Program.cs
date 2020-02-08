@@ -1,4 +1,5 @@
-﻿using Standart.Hash.xxHash;
+﻿using Microsoft.EntityFrameworkCore;
+using Standart.Hash.xxHash;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -10,7 +11,6 @@ using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using WhereTheFile.Database;
 using WhereTheFile.Types;
-using WhereTheFile.Windows;
 using DriveInfo = WhereTheFile.Types.DriveInfo;
 
 namespace WhereTheFile
@@ -22,6 +22,7 @@ namespace WhereTheFile
         private static List<DriveInfo> ScannedDrives;
         static void Main(string[] args)
         { 
+            PlatformQuirks.OnAppInit();
             Menu();
         }
 
@@ -111,7 +112,6 @@ namespace WhereTheFile
                 Console.WriteLine($"Drive {choice} doesn't exist");
                 DriveMenu();
             }
-
         }
 
         static void ScanAllDrives()
@@ -121,24 +121,70 @@ namespace WhereTheFile
 
             foreach (string drive in drives)
             {
+                if (PlatformQuirks.ShouldSkipDrive(drive))
+                {
+                    continue;
+                }
+
                 Console.WriteLine($"Scanning {drive}");
                 ScanFiles(drive);
             }
         }
 
+        static DriveInfo FindParentDrive(string path)
+        {
+            // This one isn't a technically platform quirk as even Windows can mount drives as subfolders in another drive.
+
+            foreach (var drive in ScannedDrives)
+            {
+                if (string.Equals(path, drive.CurrentDriveLetter, PlatformQuirks.FileSystemStringComparison))
+                {
+                    return drive;
+                }
+            }
+
+            var parentDirectory = Path.GetDirectoryName(path);
+            if (string.IsNullOrEmpty(parentDirectory))
+            {
+                // No match
+                throw new InvalidOperationException();
+            }
+
+            return FindParentDrive(parentDirectory);
+        }
+
         static void ScanFiles(string path)
         {
-            DriveInfo drive = ScannedDrives.First(d => path.StartsWith(d.CurrentDriveLetter));
-            WindowsInterop.RtlSetProcessPlaceholderCompatibilityMode(2);
-            int baseBuffer = 8192;
+            DriveInfo drive = FindParentDrive(path);
+
             FileSystemEnumerable<ScannedFileInfo> fse =
                 new FileSystemEnumerable<ScannedFileInfo>(path,
                     (ref FileSystemEntry entry) => new ScannedFileInfo() {FullPath = entry.ToFullPath(), Size = entry.Length, Drive = drive},
-                    new EnumerationOptions() {RecurseSubdirectories = true});
+                    new EnumerationOptions() {RecurseSubdirectories = true})
+                {
+                    ShouldRecursePredicate = (ref FileSystemEntry entry) => !PlatformQuirks.ShouldSkipDrive(entry.Directory, entry.Attributes),
+                };
 
-            var context = new WTFContext();
-            context.FilePaths.AddRange(fse);
-            context.SaveChanges();
+            using (var context = new WTFContext())
+            {
+                context.FilePaths.AddRange(fse);
+
+                var drives = context.FilePaths.Select(x => x.Drive).Distinct();
+                foreach (var d in drives)
+                {
+                    Console.WriteLine($"{d.CurrentDriveLetter}: {d.GeneratedGuid} (scanned: {d.HasBeenScanned})");
+                }
+
+                try
+                {
+                    context.SaveChanges();
+                }
+                catch (DbUpdateException ex)
+                {
+                    Console.WriteLine("Failed to save changes to index.");
+                    Console.WriteLine(ex.InnerException);
+                }
+            }
         }
 
         static List<DriveInfo> GetOrGenerateDriveGuids()
@@ -147,6 +193,11 @@ namespace WhereTheFile
             List<DriveInfo> scannedDrives = new List<DriveInfo>();
             foreach (string drive in drives)
             {
+                if (PlatformQuirks.ShouldSkipDrive(drive))
+                {
+                    continue;
+                }
+
                 string guid = String.Empty;
                 string path = Path.Join(drive, ".wtf");
                 if (File.Exists(path))
@@ -164,11 +215,6 @@ namespace WhereTheFile
 
             return scannedDrives;
         }
-
-
-
-
-
     }
 }
 
