@@ -3,167 +3,172 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Enumeration;
 using System.Linq;
+using System.Net.Mime;
+using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using WhereTheFile.Database;
 using WhereTheFile.Types;
+using DriveInfo = WhereTheFile.Types.DriveInfo;
 
 namespace WhereTheFile
 {
     class Program
     {
-      
 
-        public static List<FailedFile> FailedFiles { get; private set; } = new List<FailedFile>();
-
-        //http://www.techmikael.com/2010/02/directory-search-with-multiple-filters.html
-        // Works in .Net 4.0 - takes same patterns as old method, and executes in parallel
-
-        public static IEnumerable<FileSystemInfo> GetFileSystemInfos(string[] paths, string searchPattern, SearchOption searchOption = SearchOption.TopDirectoryOnly)
-        {
-            var context = new WTFContext();
-            paths = paths.Where(p => TryEnumerateFiles(p, context) == true).ToArray();
-            //paths = paths.Where(p=> new DirectoryInfo(p).Attributes.HasFlag())
-            return paths.AsParallel().SelectMany(path => new DirectoryInfo(path).EnumerateFileSystemInfos(searchPattern));
-        }
-
-        //public static IEnumerable<string> GetPaths(string startPath, string searchPattern, EnumerationOptions enumerationOptions)
-        //{
-        //    return path.SelectMany(path => Directory.EnumerateDirectories(path, searchPattern, enumerationOptions));
-        //}
-
-        public static bool TryEnumerateFiles(string path, WTFContext context)
-        {
-            var di = new DirectoryInfo(path);
-            try
-            {
-                var temp = di.GetFiles();
-                return true;
-            }
-
-            catch (UnauthorizedAccessException e)
-            {
-                var currentFailure = new FailedFile() { FailedFileInfo = new SimpleFileInfo(di), FailureReason = e.Message };
-                context.Add<FailedFile>(currentFailure);
-                
-                return false;
-            }
-        }
-        static (IEnumerable<HashedFile>, IEnumerable<FailedFile>) ComputeHashes(IEnumerable<FileSystemInfo> fsi, int bufferSize = 8192)
-        {
-            List<HashedFile> hashedFiles = new List<HashedFile>();
-            List<FailedFile> failedFiles = new List<FailedFile>();
-            var start = DateTime.Now;
-            foreach (var file in fsi)
-            {
-                if (file.Attributes.HasFlag(FileAttributes.Directory))
-                {
-                    continue;
-                }
-
-                if (file.Attributes.HasFlag(FileAttributes.Offline))
-                {
-                    //Console.WriteLine($"Skipping offline file: {fsi.FullName}");
-                    failedFiles.Add(new FailedFile() { FailedFileInfo = new SimpleFileInfo(file), FailureReason = "Probably an offline file" });
-                    continue;
-                }
-                                
-                try
-                {
-                    var hash = xxHash64.ComputeHash(new FileStream(file.FullName, FileMode.Open, FileAccess.Read),bufferSize);
-                    //_context.Add<HashedFile>(new HashedFile() { Hash = hash, FileInfo = fsi });
-                    hashedFiles.Add(new HashedFile() { Hash = hash, FileInfo = new SimpleFileInfo(file) });
-                    continue;
-
-                }
-                catch (Exception e)
-                {
-                    failedFiles.Add(new FailedFile() { FailedFileInfo = new SimpleFileInfo(file), FailureReason = e.Message });
-                    continue;
-                }
-            }
-            var end = DateTime.Now;
-
-            var elapsed = end - start;
-            var megabytes = hashedFiles.Sum(s => s.FileInfo.Size) / 1024 / 1024;
-            var megabytesPerSecond = megabytes / elapsed.TotalSeconds;
-            //Console.WriteLine($"Hashed {megabytes} megabytes in {elapsed} seconds, {megabytes} megabytes per second");
-            return (hashedFiles, failedFiles);
-        }
-
-
-
+        private static string[] drives;
+        private static List<DriveInfo> ScannedDrives;
         static void Main(string[] args)
+        { 
+            Menu();
+        }
+
+        static void Menu()
         {
+            Console.WriteLine("i) Generate GUIDs for drives (requires Admin the first time around)");
+            Console.WriteLine("s) Scan all drives");
+            Console.WriteLine("ss) Scan specific drive only");
+            Console.WriteLine("b) Backup scan database");
+            Console.WriteLine("q) Exit");
+            Console.WriteLine("Choice? ");
+            var choice = Console.ReadLine().Trim();
+            switch (choice)
+            {
+                case "i":
+                    GetOrGenerateDriveGuids();
+                    Menu();
+                    break;
+                case "s":
+                    ScanAllDrives();
+                    Menu();
+                    break;
+                case "ss":
+                    DriveMenu();
+                    Menu();
+                    break;
+                case "b":
+                    BackupDatabase();
+                    Menu();
+                    break;
+                case "q":
+                    Environment.Exit(0);
+                    break;
+                default:
+                    Console.WriteLine();
+                    Console.WriteLine("Invalid choice");
+                    Menu();
+                    break;
+            }
+        }
+
+        private static void BackupDatabase()
+        {
+            Console.WriteLine();
+            string databaseFile = "WTF_EF.db";
+            if (!File.Exists(databaseFile))
+            {
+                Console.WriteLine("Database doesn't exist yet");
+                Console.WriteLine();
+                Menu();
+            }
+
+            File.Copy(databaseFile, $"{databaseFile}.bak");
+            string fullPath = Path.GetFullPath($"{databaseFile}.bak");
+            Console.WriteLine($"Backed up to {fullPath}");
+            Menu();
+        }
+
+        static void DriveMenu()
+        {
+            Console.WriteLine();
+            Console.WriteLine("Scan a specific drive, or hit Enter to exit:");
+            drives = System.IO.Directory.GetLogicalDrives();
+            foreach (string drive in drives)
+            {
+                Console.WriteLine(drive);
+            }
+
+            Console.WriteLine("Choice? (enter letter only)");
+            var choice = Console.ReadLine().Trim();
+
+            if (string.IsNullOrEmpty(choice))
+            {
+                Menu();
+            }
+
+            var choiceDrive =
+                drives.FirstOrDefault(d => d.StartsWith(choice, StringComparison.InvariantCultureIgnoreCase));
+
+            if (!string.IsNullOrEmpty(choiceDrive))
+            {
+                ScanFiles(choiceDrive);
+            }
+
+            else
+            {
+                Console.WriteLine($"Drive {choice} doesn't exist");
+                DriveMenu();
+            }
+
+        }
+
+        static void ScanAllDrives()
+        {
+            drives = System.IO.Directory.GetLogicalDrives();
+            ScannedDrives = GetOrGenerateDriveGuids();
+
+            foreach (string drive in drives)
+            {
+                Console.WriteLine($"Scanning {drive}");
+                ScanFiles(drive);
+            }
+        }
+
+        static void ScanFiles(string path)
+        {
+            DriveInfo drive = ScannedDrives.First(d => path.StartsWith(d.CurrentDriveLetter));
             WindowsInterop.RtlSetProcessPlaceholderCompatibilityMode(2);
             int baseBuffer = 8192;
-            
-            HashAllFiles(1000, baseBuffer);
-            //HashAllFiles(10000, baseBuffer * 10);
+            FileSystemEnumerable<ScannedFileInfo> fse =
+                new FileSystemEnumerable<ScannedFileInfo>(path,
+                    (ref FileSystemEntry entry) => new ScannedFileInfo() {FullPath = entry.ToFullPath(), Size = entry.Length, Drive = drive},
+                    new EnumerationOptions() {RecurseSubdirectories = true});
 
+            var context = new WTFContext();
+            context.FilePaths.AddRange(fse);
+            context.SaveChanges();
         }
 
-        static void HashAllFiles(int partitionSize, int bufferSize)
+        static List<DriveInfo> GetOrGenerateDriveGuids()
         {
-
-        WTFContext _context = new WTFContext();
-
-        var paths = Directory.GetDirectories("C:\\", "*", new EnumerationOptions() { RecurseSubdirectories = true });
-
-            var files = GetFileSystemInfos(paths.ToArray(), "*");
-
-            int numberFailed = _context.SaveChanges();
-            //Console.WriteLine($"Saved {numberFailed} failed paths");
-            var allFiles = files.ToArray();
-            //Console.WriteLine($"Scanned {allFiles.Length} files");
-
-            var start = DateTime.Now;
-            OrderablePartitioner<Tuple<int, int>> chunks = Partitioner.Create(0, allFiles.Length, partitionSize);
-
-            int total = allFiles.Length;
-            ConcurrentBag<HashedFile> hashedFilesBag = new ConcurrentBag<HashedFile>();
-            ConcurrentBag<FailedFile> failedFilesBag = new ConcurrentBag<FailedFile>();
-
-            Parallel.ForEach(chunks, chunk =>
+            //This is far easier than trying to get the drive serial number, but I guess I'll have to do that eventually
+            List<DriveInfo> scannedDrives = new List<DriveInfo>();
+            foreach (string drive in drives)
             {
-                int start = chunk.Item1;
-                int end = chunk.Item2;
-
-                (IEnumerable<HashedFile> hashedFiles, IEnumerable<FailedFile> failedFiles) = ComputeHashes(allFiles.Skip(start).Take(end - start));
-
-                foreach (var hashedFile in hashedFiles)
+                string guid = String.Empty;
+                string path = Path.Join(drive, ".wtf");
+                if (File.Exists(path))
                 {
-                    hashedFilesBag.Add(hashedFile);
+                    guid = File.ReadAllText(path);
                 }
 
-                foreach (var failedFile in failedFiles)
+                else
                 {
-                    failedFilesBag.Add(failedFile);
+                    guid = Guid.NewGuid().ToString();
+                    File.WriteAllText(path,guid);
                 }
+                scannedDrives.Add(new DriveInfo() { CurrentDriveLetter = drive, GeneratedGuid = guid, HasBeenScanned = false});
+            }
 
-
-
-            });
-
-            var end = DateTime.Now;
-
-            //lock (_lock)
-            //{
-            _context.FailedFiles.AddRange(failedFilesBag.ToArray());
-            _context.Files.AddRange(hashedFilesBag.ToArray());
-            _context.SaveChanges();
-            _context = null;
-                                                                                       
-            Console.WriteLine();
-            Console.WriteLine();
-            Console.WriteLine();
-
-            Console.WriteLine($"Using partition size {partitionSize} and buffer size {bufferSize}, hashing took ${end - start}");
-            //ParallelEnumerable. (files,new ParallelOptions() {MaxDegreeOfParallelism = 4 }, (a, b) => { })
-            //var hashes = allFiles.Select(file => ComputeHash(file)).ToArray();
+            return scannedDrives;
         }
+
+
+
 
 
     }
 }
+
 

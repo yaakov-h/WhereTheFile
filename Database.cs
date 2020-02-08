@@ -15,14 +15,9 @@ namespace WhereTheFile.Database
             }
         }
 
-        public WTFContext(DbContextOptions<WTFContext> options) : base(options)
-        {
-
-        }
-
-
-        public DbSet<HashedFile> Files { get; set; }
-        public DbSet<FailedFile> FailedFiles { get; set; }
+ 
+        public DbSet<ScannedFileInfo> FilePaths { get; set; }
+        public DbSet<DriveInfo> Drives { get; set; }
 
         public WTFContext()
         {
